@@ -27,8 +27,11 @@ let editId    = null;
 let showBanner = false;
 // cat management sheet
 let showCatSheet = false;
-let catEditName  = '';   // name being edited (empty = adding new)
+let catEditName  = '';
 let catNewInput  = '';
+// import sheet
+let showImport   = false;
+let importState  = null; // { rows, errors, ready } after parsing
 
 function today() { return new Date().toISOString().slice(0,10); }
 function uid()   { return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
@@ -85,6 +88,7 @@ const ICONS = {
   info:      `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>`,
   x:         `<svg viewBox="0 0 24 24" fill="none" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>`,
   tag:       `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>`,
+  upload:    `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/></svg>`,
   settings:  `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
 };
 
@@ -435,6 +439,180 @@ function confirmDelete(id) {
   if (confirm(`"${it.name}" löschen?`)) { items = items.filter(i=>i.id!==id); save(); render(); }
 }
 
+// ---- CSV Import ----
+const SECTION_MAP = {
+  'klappe':     'fach',
+  'oberfach':   'fach',
+  'schublade 1':'s1',
+  'schublade 2':'s2',
+  'schublade 3':'s3',
+  'schublade 4':'s4',
+  'schublade 5':'s5',
+};
+
+function parseDateDE(str) {
+  // DD.MM.YYYY -> YYYY-MM-DD
+  if (!str || !str.trim()) return '';
+  const m = str.trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (!m) return '';
+  return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const rows = [];
+  const errors = [];
+  // detect separator (semicolon or comma)
+  const sep = lines[0].includes(';') ? ';' : ',';
+  const header = lines[0].split(sep).map(h => h.trim().toLowerCase());
+
+  // flexible column mapping
+  const col = name => header.findIndex(h => h.includes(name));
+  const iArt        = col('art');        // category
+  const iEinlag     = col('einlager');   // stored date
+  const iBeschr     = col('beschr');     // name/description
+  const iAbteil     = col('abteil');     // section
+  const iEntnommen  = col('entnommen');  // present (inverse)
+  const iMHD        = col('mhd');        // optional expiry
+
+  if (iArt < 0 || iEinlag < 0 || iBeschr < 0 || iAbteil < 0) {
+    return { rows: [], errors: ['Spalten nicht erkannt. Erwartet: Art, Einlagerung, Beschreibung, Abteil'] };
+  }
+
+  for (let i = 1; i < lines.length; i++) {
+    const raw = lines[i];
+    if (!raw.trim()) continue;
+    const cols = raw.split(sep);
+    const art      = (cols[iArt]       || '').trim();
+    const einlag   = (cols[iEinlag]    || '').trim();
+    const beschr   = (cols[iBeschr]    || '').trim();
+    const abteil   = (cols[iAbteil]    || '').trim();
+    const entnom   = iEntnommen >= 0 ? (cols[iEntnommen] || '').trim().toLowerCase() : 'nein';
+    const mhd      = iMHD >= 0 ? (cols[iMHD] || '').trim() : '';
+
+    if (!beschr && !art) continue;
+
+    const secKey = SECTION_MAP[abteil.toLowerCase()];
+    const stored  = parseDateDE(einlag);
+    const expires = parseDateDE(mhd);
+    const present = !(entnom === 'ja' || entnom === 'yes' || entnom === '1' || entnom === 'true');
+
+    if (!secKey) { errors.push(`Zeile ${i+1}: Abteil "${abteil}" unbekannt, wird als Oberfach importiert.`); }
+
+    // add category if new
+    if (art && !cats.includes(art)) cats.push(art);
+
+    rows.push({
+      id:       uid(),
+      name:     beschr || art,
+      category: art || 'Sonstiges',
+      section:  secKey || 'fach',
+      stored:   stored || today(),
+      expires,
+      present,
+    });
+  }
+  return { rows, errors };
+}
+
+function renderImportSheet() {
+  const ov = el('div', { class: 'overlay', id: 'import-overlay' });
+  ov.addEventListener('click', e => { if (e.target === ov) { showImport=false; importState=null; render(); } });
+
+  const sheet = el('div', { class: 'sheet' });
+
+  if (!importState) {
+    // Step 1: file picker
+    sheet.innerHTML = `
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">
+        CSV importieren
+        <button class="icon-btn" id="imp-close" aria-label="Schließen">${icon('x')}</button>
+      </div>
+      <p class="cat-hint" style="font-size:14px;color:var(--text2);text-align:left;margin-bottom:16px">
+        Ninox-Export (CSV, Semikolon-getrennt) auswählen.<br>
+        Spalten: <strong>Art · Einlagerung · Beschreibung · Abteil · Entnommen</strong>
+      </p>
+      <label class="imp-file-label" id="imp-file-label">
+        ${icon('upload')}
+        <span>CSV-Datei auswählen</span>
+        <input type="file" id="imp-file" accept=".csv,text/csv" style="display:none" />
+      </label>`;
+
+    sheet.querySelector('#imp-close').addEventListener('click', () => { showImport=false; importState=null; render(); });
+    sheet.querySelector('#imp-file-label').addEventListener('click', () => sheet.querySelector('#imp-file').click());
+    sheet.querySelector('#imp-file').addEventListener('change', e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        importState = parseCSV(ev.target.result);
+        render();
+      };
+      reader.readAsText(file, 'UTF-8');
+    });
+
+  } else {
+    // Step 2: preview & confirm
+    const { rows, errors } = importState;
+    const dupes = rows.filter(r => items.some(i => i.name === r.name && i.stored === r.stored && i.section === r.section));
+    const newRows = rows.filter(r => !dupes.includes(r));
+
+    sheet.innerHTML = `
+      <div class="sheet-handle"></div>
+      <div class="sheet-title">
+        Import-Vorschau
+        <button class="icon-btn" id="imp-close2" aria-label="Schließen">${icon('x')}</button>
+      </div>
+      ${errors.length ? `<div class="imp-warn">${icon('info')} ${errors.length} Hinweis${errors.length>1?'e':''}: ${errors[0]}${errors.length>1?` (+${errors.length-1})`:''}</div>` : ''}
+      <div class="imp-summary">
+        <div class="imp-sum-row"><span>Gefunden</span><strong>${rows.length} Artikel</strong></div>
+        <div class="imp-sum-row"><span>Neu (werden importiert)</span><strong style="color:var(--accent)">${newRows.length}</strong></div>
+        <div class="imp-sum-row"><span>Bereits vorhanden (übersprungen)</span><strong style="color:var(--text3)">${dupes.length}</strong></div>
+      </div>
+      <div id="imp-preview"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="icon-btn" id="imp-back" style="flex:0 0 44px;height:44px">${icon('x')}</button>
+        <button class="btn-save" id="imp-confirm" ${newRows.length===0?'disabled style="opacity:0.4"':''}>
+          ${newRows.length} Artikel importieren
+        </button>
+      </div>`;
+
+    // Preview list (max 8)
+    const preview = sheet.querySelector('#imp-preview');
+    const show = newRows.slice(0,8);
+    show.forEach(r => {
+      const secLabel = SECTIONS.find(s=>s.id===r.section)?.label||r.section;
+      preview.appendChild(html(`
+        <div class="imp-row">
+          <span class="tag" style="flex-shrink:0">${r.category}</span>
+          <span class="imp-row-name">${r.name}</span>
+          <span style="font-size:11px;color:var(--text3);white-space:nowrap">${secLabel}</span>
+        </div>`));
+    });
+    if (newRows.length > 8) {
+      preview.appendChild(html(`<div style="text-align:center;font-size:12px;color:var(--text3);padding:6px">… und ${newRows.length-8} weitere</div>`));
+    }
+
+    sheet.querySelector('#imp-close2').addEventListener('click', () => { showImport=false; importState=null; render(); });
+    sheet.querySelector('#imp-back').addEventListener('click', () => { importState=null; render(); });
+    const confirmBtn = sheet.querySelector('#imp-confirm');
+    if (newRows.length > 0) {
+      confirmBtn.addEventListener('click', () => {
+        items.push(...newRows);
+        saveCats();
+        save();
+        showImport=false; importState=null;
+        render();
+        setTimeout(() => alert(`${newRows.length} Artikel erfolgreich importiert.`), 100);
+      });
+    }
+  }
+
+  ov.appendChild(sheet);
+  return ov;
+}
+
 // ---- Install banner ----
 function checkInstallBanner() {
   const dismissed = localStorage.getItem(BANNER_KEY);
@@ -453,12 +631,14 @@ function render() {
       <div class="topbar-inner">
         <h1>${icon('snowflake')} Gefrierschrank</h1>
         <div style="display:flex;gap:8px;align-items:center">
+          <button class="icon-btn topbar-icon" id="btn-import" aria-label="CSV importieren">${icon('upload')}</button>
           <button class="icon-btn topbar-icon" id="btn-cats" aria-label="Kategorien verwalten">${icon('tag')}</button>
           <button class="fab" id="fab-add" aria-label="Neuen Artikel hinzufügen">${icon('plus')}</button>
         </div>
       </div>
     </div>`);
   topbar.querySelector('#fab-add').addEventListener('click', () => openAdd());
+  topbar.querySelector('#btn-import').addEventListener('click', () => { showImport=true; importState=null; render(); });
   topbar.querySelector('#btn-cats').addEventListener('click', () => { showCatSheet=true; catEditName=''; catNewInput=''; render(); });
   app.appendChild(topbar);
 
@@ -512,8 +692,9 @@ function render() {
 
   app.appendChild(content);
 
-  if (showForm)    app.appendChild(renderForm());
+  if (showForm)     app.appendChild(renderForm());
   if (showCatSheet) app.appendChild(renderCatSheet());
+  if (showImport)   app.appendChild(renderImportSheet());
 }
 
 // ---- Bootstrap ----

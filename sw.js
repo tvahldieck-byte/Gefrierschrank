@@ -1,4 +1,4 @@
-const CACHE = 'gefrierapp-v1';
+const CACHE = 'gefrierapp-v3';
 const ASSETS = [
   './',
   './index.html',
