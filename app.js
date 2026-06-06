@@ -2,7 +2,7 @@
 
 // ---- Supabase config ----
 const SB_URL = 'https://wtvqfarvprvjbfajoiqz.supabase.co';
-const SB_KEY = 'sb_publishable_jTSx8THaXH2uM3zSIwkWaA_Dh6u_KUt';
+const SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind0dnFmYXJ2cHJ2amJmYWpvaXF6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA2NzAzMDQsImV4cCI6MjA5NjI0NjMwNH0.UU5wYmone2iDH7b0TYxs_WavD4FFsF4m6swJ5LtvhRc';
 
 function sbHeaders() {
   return {
